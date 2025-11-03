@@ -26,7 +26,6 @@
 const config = require('config');
 const urlLib = require('url');
 const Translate = require('./translation/translate');
-const HTTP = require('./http');
 const { jar: cookieJar } = require('request');
 
 const FORWARDED_HEADERS = ['Accept-Language'];
@@ -57,7 +56,7 @@ PDFSession.prototype.handleURL = async function () {
 	}
 	
 	try {
-		var parsedURL = urlLib.parse(url);
+		urlLib.parse(url);
 	}
 	catch (e) {
 		this.ctx.throw(400, "Invalid URL provided\n");
@@ -160,9 +159,11 @@ PDFSession.prototype.translate = async function (translate, translators) {
 	
 	var translator;
 	var items;
-	while (translator = translators.shift()) {
+	// eslint-disable-next-line no-await-in-loop
+	while ((translator = translators.shift())) {
 		translate.setTranslator(translator);
 		try {
+			// eslint-disable-next-line no-await-in-loop
 			items = await translate.translate({
 				libraryID: false
 			});

@@ -25,7 +25,7 @@
 
 const PDFSession = require('./pdfSession');
 
-var PDFEndpoint = module.exports = {
+module.exports = {
 	handle: async function (ctx, next) {
 		ctx.assert(ctx.is('text/plain') || ctx.is('json'), 415);
 		
