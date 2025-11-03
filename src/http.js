@@ -202,6 +202,10 @@ Zotero.HTTP = new function() {
 			result.response = body;
 			result.responseText = body;
 		}
+		else if (responseType == 'buffer') {
+			// Return raw buffer for binary data (e.g., PDFs)
+			result.response = body;
+		}
 		else {
 			throw new Error("Invalid responseType");
 		}

@@ -134,6 +134,28 @@ Returns `300 Multiple Choices` with a JSON object:
 
 To make a selection, delete unwanted results from the items object and POST the returned data back to the server as `application/json`.
 
+### PDF Download
+
+Download full-text PDFs from web pages using the same translators as the `/web` endpoint:
+
+```
+$ curl -d 'https://arxiv.org/abs/1234.5678' \
+   -H 'Content-Type: text/plain' http://127.0.0.1:1969/pdf > paper.pdf
+```
+
+The endpoint will:
+1. Use Zotero translators to extract metadata and locate PDF attachments
+2. Download the PDF file from the discovered URL
+3. Return the PDF as `application/pdf` with appropriate filename
+
+Returns:
+- `200 OK` with PDF binary data if successful
+- `400 Bad Request` if the URL is invalid or the page cannot be accessed
+- `404 Not Found` if no PDF attachment is found
+- `501 Not Implemented` if no translator is available for the URL
+
+Note: This endpoint does not support item selection (multiple items). It will return an error if the translator finds multiple items.
+
 
 ### Search Translation
 
