@@ -24,7 +24,6 @@
 */
 
 const config = require('config');
-const urlLib = require('url');
 const Translate = require('./translation/translate');
 const { jar: cookieJar } = require('request');
 
@@ -56,7 +55,12 @@ PDFSession.prototype.handleURL = async function () {
 	}
 	
 	try {
-		urlLib.parse(url);
+		// Parse and validate URL - will throw if invalid
+		let parsedURL = new URL(url);
+		// Basic validation that it's http/https
+		if (parsedURL.protocol !== 'http:' && parsedURL.protocol !== 'https:') {
+			throw new Error('Invalid protocol');
+		}
 	}
 	catch (e) {
 		this.ctx.throw(400, "Invalid URL provided\n");
@@ -199,7 +203,7 @@ PDFSession.prototype.translate = async function (translate, translators) {
 	}
 	
 	if (!pdfAttachment) {
-		this.ctx.throw(404, "No PDF attachment found for this URL\n");
+		this.ctx.throw(501, "No PDF attachment found for this URL\n");
 		return;
 	}
 	
@@ -226,19 +230,19 @@ PDFSession.prototype.translate = async function (translate, translators) {
 			}
 		);
 		
-		// Verify we got a PDF
-		let contentType = response.getResponseHeader('content-type');
-		if (contentType && !contentType.includes('application/pdf') && !contentType.includes('application/octet-stream')) {
-			this.ctx.throw(500, `Expected PDF but got ${contentType}\n`);
-			return;
-		}
+		// Note: We accept any content-type since many servers serve PDFs with generic MIME types
+		// The translator already verified this is a PDF attachment, so we trust that
 		
 		// Return the PDF
 		this.ctx.response.status = 200;
 		this.ctx.response.set('Content-Type', 'application/pdf');
 		if (pdfAttachment.title) {
-			// Sanitize filename
-			let filename = pdfAttachment.title.replace(/[^a-zA-Z0-9_\-. ]/g, '_');
+			// Sanitize filename: remove path components, special chars, and limit length
+			let filename = pdfAttachment.title
+				.replace(/[/\\]/g, '') // Remove path separators
+				.replace(/\.\./g, '') // Remove parent directory references
+				.replace(/[^a-zA-Z0-9_\-. ]/g, '_') // Replace special chars
+				.substring(0, 200); // Limit length
 			if (!filename.endsWith('.pdf')) {
 				filename += '.pdf';
 			}
