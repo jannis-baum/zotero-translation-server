@@ -27,7 +27,7 @@ const PDFSession = require('./pdfSession');
 
 module.exports = {
 	handle: async function (ctx, next) {
-		ctx.assert(ctx.is('text/plain') || ctx.is('json'), 415);
+		ctx.assert(ctx.is('json'), 415);
 		
 		var data = ctx.request.body;
 		
@@ -35,19 +35,12 @@ module.exports = {
 			ctx.throw(400, "POST data not provided\n");
 		}
 		
-		// From https://stackoverflow.com/a/3809435, modified to allow up to 9-char TLDs and IP addresses
-		let urlRE = /^(https?:\/\/)?([-a-zA-Z0-9@:%._+~#=]{2,256}\.[a-z]{2,9}\b|((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)(\.|\b)){4})(\S*)$/i;
-		
-		if (!data.match(urlRE)) {
-			ctx.throw(400, "URL not provided");
+		// Data must be a JSON array (items from /web endpoint)
+		if (!Array.isArray(data)) {
+			ctx.throw(400, "POST data must be an array of items from /web endpoint");
 		}
 		
-		// Prepend 'http://' if not provided
-		if (!data.startsWith('http')) {
-			data = 'http://' + data;
-		}
-		
-		let session = new PDFSession(ctx, next, data);
-		await session.handleURL();
+		let session = new PDFSession(ctx, next);
+		await session.handleItems(data);
 	}
 };

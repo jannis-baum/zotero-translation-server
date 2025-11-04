@@ -136,24 +136,45 @@ To make a selection, delete unwanted results from the items object and POST the 
 
 ### PDF Download
 
-Download full-text PDFs from web pages using the same translators as the `/web` endpoint:
+Download full-text PDFs by first retrieving metadata from `/web`, then passing those items to `/pdf`:
 
-```
-$ curl -d 'https://arxiv.org/abs/1234.5678' \
-   -H 'Content-Type: text/plain' http://127.0.0.1:1969/pdf > paper.pdf
+```bash
+# Step 1: Get metadata from a URL
+$ curl -d 'https://arxiv.org/abs/1706.03762' \
+   -H 'Content-Type: text/plain' \
+   http://127.0.0.1:1969/web > items.json
+
+# Step 2: Download PDF from the items
+$ curl -d @items.json \
+   -H 'Content-Type: application/json' \
+   http://127.0.0.1:1969/pdf > paper.pdf
 ```
 
-The endpoint will:
-1. Use Zotero translators to extract metadata and locate PDF attachments
-2. If no PDF is found by translators and the item has a DOI, query Unpaywall for open-access PDFs
-3. Download the PDF file from the discovered URL
-4. Return the PDF as `application/pdf` with appropriate filename
+Or in a single pipeline:
+
+```bash
+$ curl -d 'https://www.science.org/doi/10.1126/science.aar4120' \
+   -H 'Content-Type: text/plain' \
+   http://127.0.0.1:1969/web | \
+   curl -d @- -H 'Content-Type: application/json' \
+   http://127.0.0.1:1969/pdf > paper.pdf
+```
+
+The `/pdf` endpoint:
+1. Accepts an array of items from the `/web` endpoint
+2. Searches for PDF attachments in the items
+3. If no PDF is found and the item has a DOI, queries Unpaywall for open-access PDFs
+4. Downloads and returns the PDF with appropriate filename
+
+#### Why Two-Step Process?
+
+This design leverages the robust error handling in `/web` (e.g., handling 403 errors via DOI lookup) and avoids duplicating translator logic. The `/web` endpoint handles all the complexity of retrieving metadata, and `/pdf` focuses solely on finding and downloading PDFs.
 
 #### Unpaywall Integration
 
 To enable Unpaywall for finding open-access PDFs, set the `UNPAYWALL_EMAIL` environment variable to your email address:
 
-```
+```bash
 UNPAYWALL_EMAIL='your-email@example.com' npm start
 ```
 
@@ -161,11 +182,8 @@ If `UNPAYWALL_EMAIL` is not set, the server will fall back to using `git config 
 
 Returns:
 - `200 OK` with PDF binary data if successful
-- `400 Bad Request` if the URL is invalid or the page cannot be accessed
+- `400 Bad Request` if the input is invalid or empty
 - `501 Not Implemented` if no PDF attachment is found (including via Unpaywall)
-- `501 Not Implemented` if no translator is available for the URL
-
-Note: This endpoint does not support item selection (multiple items). It will return an error if the translator finds multiple items.
 
 
 ### Search Translation

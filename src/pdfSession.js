@@ -23,181 +23,42 @@
     ***** END LICENSE BLOCK *****
 */
 
-const config = require('config');
-const Translate = require('./translation/translate');
 const { jar: cookieJar } = require('request');
 
-const FORWARDED_HEADERS = ['Accept-Language'];
 const PRIMARY_ATTACHMENT_TYPES = new Set([
 	'application/pdf',
 	'application/epub+zip',
 ]);
 
-var PDFSession = module.exports = function (ctx, next, url) {
+var PDFSession = module.exports = function (ctx, next) {
 	this.ctx = ctx;
 	this.next = next;
-	this.url = url;
 };
 
 /**
+ * Handle items from /web endpoint - find and download PDF
  * @return {Promise<undefined>}
  */
-PDFSession.prototype.handleURL = async function () {
-	var url = this.url;
-	
-	// Forward supported headers
-	var headers = {};
-	for (let header of FORWARDED_HEADERS) {
-		let lc = header.toLowerCase();
-		if (this.ctx.headers[lc]) {
-			headers[header] = this.ctx.headers[lc];
-		}
+PDFSession.prototype.handleItems = async function (items) {
+	if (!Array.isArray(items) || items.length === 0) {
+		this.ctx.throw(400, "Items array is empty or invalid\n");
 	}
 	
-	try {
-		// Parse and validate URL - will throw if invalid
-		let parsedURL = new URL(url);
-		// Basic validation that it's http/https
-		if (parsedURL.protocol !== 'http:' && parsedURL.protocol !== 'https:') {
-			throw new Error('Invalid protocol');
-		}
-	}
-	catch (e) {
-		this.ctx.throw(400, "Invalid URL provided\n");
-	}
-	
-	// Check domain
-	var m = url.match(/https?:\/\/([^/]+)/);
-	if (m) {
-		let domain = m[1];
-		let blacklisted = config.get("blacklistedDomains")
-			.some(x => x && new RegExp(x).test(domain));
-		if (blacklisted) {
-			this.ctx.throw(500, "Domain is blacklisted\n");
-		}
-	}
-	
-	// New request
+	// Initialize cookie sandbox for PDF downloads
 	this._cookieSandbox = cookieJar();
 	
-	let resolve;
-	let reject;
-	let promise = new Promise(function () {
-		resolve = arguments[0];
-		reject = arguments[1];
-	});
-	
-	let translate = new Translate.Web();
-	let translatePromise;
-	translate.setHandler("translators", async function (translate, translators) {
-		try {
-			translatePromise = this.translate(translate, translators);
-			await translatePromise;
-			resolve();
-		}
-		catch (e) {
-			reject(e);
-		}
-	}.bind(this));
-	
-	// We don't handle select for PDF endpoint - just fail if multiple items
-	translate.setHandler("select", (translate, items, callback) => {
-		reject(new Error("Multiple items found - PDF endpoint does not support item selection"));
-		callback([]);
-	});
-	
-	translate.setCookieSandbox(this._cookieSandbox);
-	translate.setRequestHeaders(headers);
-	
-	try {
-		let req = await Zotero.HTTP.request(
-			"GET",
-			url,
-			{
-				responseType: 'document',
-				cookieSandbox: this._cookieSandbox,
-				headers
-			}
-		);
-		translate.setDocument(req.response);
-		translate.getTranslators(true);
-		
-		await promise;
-	}
-	catch (e) {
-		Zotero.debug(e, 1);
-		
-		if (e instanceof Zotero.HTTP.StatusError && e.status == 404) {
-			this.ctx.throw(400, "Remote page not found");
-		}
-		
-		if (e instanceof Zotero.HTTP.ResponseSizeError) {
-			this.ctx.throw(400, "Response exceeds max size");
-		}
-		
-		if (e instanceof Zotero.HTTP.UnsupportedFormatError) {
-			this.ctx.throw(400, "The remote document is not in a supported format");
-		}
-		
-		// Check if error has a status code (from ctx.throw)
-		if (e.status) {
-			this.ctx.throw(e.status, e.message);
-		}
-		
-		this.ctx.throw(500, "An error occurred retrieving the document");
-	}
-};
-
-/**
- * Called when translators are available to perform translation and fetch PDF
- *
- * @return {Promise<undefined>}
- */
-PDFSession.prototype.translate = async function (translate, translators) {
-	// No matching translators
-	if (!translators.length) {
-		Zotero.debug("No translators found");
-		this.ctx.throw(501, "No translators available for this URL\n");
-		return;
-	}
-	
-	var translator;
-	var items;
-	// eslint-disable-next-line no-await-in-loop
-	while ((translator = translators.shift())) {
-		translate.setTranslator(translator);
-		try {
-			// eslint-disable-next-line no-await-in-loop
-			items = await translate.translate({
-				libraryID: false
-			});
-			break;
-		}
-		catch (e) {
-			Zotero.debug("Translation using " + translator.label + " failed", 1);
-			Zotero.debug(e, 1);
-			
-			// If no more translators, fail
-			if (!translators.length) {
-				this.ctx.throw(500, "Translation failed\n");
-				return;
-			}
-			
-			// Try next translator
-		}
-	}
-	
-	// Find PDF attachment
+	// Find PDF attachment and item with DOI for Unpaywall
 	let pdfAttachment = null;
 	let itemWithDOI = null;
+	
 	for (let item of items) {
 		// Track item with DOI for Unpaywall fallback
 		if (item.DOI && !itemWithDOI) {
 			itemWithDOI = item;
 		}
 		
+		// Look for PDF attachments
 		if (item.attachments && item.attachments.length > 0) {
-			// Look for primary attachment types (PDF, EPUB)
 			for (let attachment of item.attachments) {
 				if (PRIMARY_ATTACHMENT_TYPES.has(attachment.mimeType)) {
 					pdfAttachment = attachment;
@@ -208,17 +69,26 @@ PDFSession.prototype.translate = async function (translate, translators) {
 		}
 	}
 	
-	// If no PDF found from translator, try Unpaywall
+	// If no PDF found from items, try Unpaywall
 	if (!pdfAttachment && itemWithDOI) {
 		pdfAttachment = await this.findPDFViaUnpaywall(itemWithDOI);
 	}
 	
 	if (!pdfAttachment) {
-		this.ctx.throw(501, "No PDF attachment found for this URL\n");
+		this.ctx.throw(501, "No PDF attachment found in provided items\n");
 		return;
 	}
 	
-	// Fetch the PDF
+	// Download and return the PDF
+	await this.downloadPDF(pdfAttachment);
+};
+
+/**
+ * Download a PDF from an attachment object and return it
+ * @param {Object} pdfAttachment - Attachment object with url, title, mimeType
+ * @return {Promise<undefined>}
+ */
+PDFSession.prototype.downloadPDF = async function (pdfAttachment) {
 	try {
 		let pdfURL = pdfAttachment.url;
 		Zotero.debug(`Fetching PDF from ${pdfURL}`);
