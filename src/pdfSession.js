@@ -24,6 +24,8 @@
 */
 
 const { jar: cookieJar } = require('request');
+const { firefox } = require('playwright');
+const Translate = require('./translation/translate');
 
 const PRIMARY_ATTACHMENT_TYPES = new Set([
 	'application/pdf',
@@ -79,50 +81,49 @@ PDFSession.prototype.handleItems = async function (items) {
 		return;
 	}
 	
-	// Download and return the PDF
-	await this.downloadPDF(pdfAttachment);
+	// Download and return the PDF using Playwright
+	await this.downloadPDFWithPlaywright(pdfAttachment);
 };
 
 /**
- * Download a PDF from an attachment object and return it
+ * Download a PDF using Playwright (handles bot protection)
  * @param {Object} pdfAttachment - Attachment object with url, title, mimeType
  * @return {Promise<undefined>}
  */
-PDFSession.prototype.downloadPDF = async function (pdfAttachment) {
+PDFSession.prototype.downloadPDFWithPlaywright = async function (pdfAttachment) {
+	let browser = null;
 	try {
 		let pdfURL = pdfAttachment.url;
-		Zotero.debug(`Fetching PDF from ${pdfURL}`);
+		Zotero.debug(`Fetching PDF with Playwright from ${pdfURL}`);
 		
-		// Use buffer responseType to get raw binary data
-		let responseTypeMap = new Map([
-			['application/pdf', 'buffer'],
-			['application/octet-stream', 'buffer'],
-			['text/html', 'buffer'] // Some servers return HTML for PDFs
+		// Launch headless Firefox
+		browser = await firefox.launch({ headless: true });
+		
+		// Create a context that allows downloads
+		const context = await browser.newContext({
+			acceptDownloads: true
+		});
+		
+		const page = await context.newPage();
+		
+		// Navigate and wait for download
+		const [download] = await Promise.all([
+			page.waitForEvent('download', { timeout: 60000 }),
+			page.goto(pdfURL, { timeout: 60000 })
 		]);
 		
-		let response = await Zotero.HTTP.request(
-			"GET",
-			pdfURL,
-			{
-				timeout: 60000,
-				cookieSandbox: this._cookieSandbox,
-				responseTypeMap: responseTypeMap,
-				successCodes: false, // Allow any status code
-				maxResponseSize: 50 * 1024 * 1024 // 50MB max for PDFs
-			}
-		);
+		// Get the downloaded file as a buffer
+		const stream = await download.createReadStream();
+		const chunks = [];
+		for await (const chunk of stream) {
+			chunks.push(chunk);
+		}
+		const buffer = Buffer.concat(chunks);
 		
-		// Check if we actually got a PDF (starts with %PDF)
-		let buffer = response.response;
-		if (Buffer.isBuffer(buffer)) {
-			let header = buffer.slice(0, 5).toString('utf8');
-			if (!header.startsWith('%PDF')) {
-				// Not a PDF - probably an error page
-				let contentType = response.getResponseHeader('content-type');
-				Zotero.debug(`Expected PDF but got content-type: ${contentType}`);
-				Zotero.debug(`Response starts with: ${buffer.slice(0, 200).toString('utf8')}`);
-				throw new Error(`Downloaded file is not a PDF (starts with: ${header})`);
-			}
+		// Verify it's a PDF
+		const header = buffer.slice(0, 5).toString('utf8');
+		if (!header.startsWith('%PDF')) {
+			throw new Error(`Downloaded file is not a PDF (starts with: ${header})`);
 		}
 		
 		// Return the PDF
@@ -141,17 +142,21 @@ PDFSession.prototype.downloadPDF = async function (pdfAttachment) {
 			this.ctx.response.set('Content-Disposition', `attachment; filename="${filename}"`);
 		}
 		
-		// response.response is a Buffer when responseType is 'buffer'
-		this.ctx.response.body = response.response;
+		this.ctx.response.body = buffer;
 	}
 	catch (e) {
-		Zotero.debug("Error fetching PDF: " + e, 1);
+		Zotero.debug("Error fetching PDF with Playwright: " + e, 1);
 		this.ctx.throw(500, "Failed to fetch PDF: " + e.message);
+	}
+	finally {
+		if (browser) {
+			await browser.close();
+		}
 	}
 };
 
 /**
- * Try to find open-access PDF via Unpaywall
+ * Try to find open-access PDF via Unpaywall by trying all OA locations
  * @param {Object} item - Item with DOI
  * @return {Promise<Object|null>} - PDF attachment object or null
  */
@@ -189,23 +194,105 @@ PDFSession.prototype.findPDFViaUnpaywall = async function (item) {
 		
 		let data = response.response;
 		
-		// Look for best open access location
-		let bestLocation = data.best_oa_location;
-		if (!bestLocation || !bestLocation.url_for_pdf) {
-			Zotero.debug("No PDF URL in Unpaywall response");
+		// Try all OA locations, not just the best one
+		let oaLocations = data.oa_locations || [];
+		if (oaLocations.length === 0) {
+			Zotero.debug("No OA locations in Unpaywall response");
 			return null;
 		}
 		
-		Zotero.debug(`Found open-access PDF via Unpaywall: ${bestLocation.url_for_pdf}`);
+		Zotero.debug(`Found ${oaLocations.length} OA locations from Unpaywall`);
 		
-		return {
-			url: bestLocation.url_for_pdf,
-			title: item.title || 'Unpaywall PDF',
-			mimeType: 'application/pdf'
-		};
+		// Try each OA location
+		for (let location of oaLocations) {
+			Zotero.debug(`Trying OA location: ${location.url_for_landing_page || location.url}`);
+			
+			// If there's a direct PDF URL, try it first
+			if (location.url_for_pdf) {
+				Zotero.debug(`Found direct PDF URL: ${location.url_for_pdf}`);
+				return {
+					url: location.url_for_pdf,
+					title: item.title || 'Unpaywall PDF',
+					mimeType: 'application/pdf'
+				};
+			}
+			
+			// Otherwise, try the landing page with /web endpoint to get attachments
+			let landingPage = location.url_for_landing_page || location.url;
+			if (landingPage) {
+				try {
+					Zotero.debug(`Trying landing page via /web: ${landingPage}`);
+					let webItems = await this.getItemsFromURL(landingPage);
+					
+					// Check if we got items with PDF attachments
+					if (webItems && webItems.length > 0) {
+						for (let webItem of webItems) {
+							if (webItem.attachments && webItem.attachments.length > 0) {
+								for (let attachment of webItem.attachments) {
+									if (PRIMARY_ATTACHMENT_TYPES.has(attachment.mimeType)) {
+										Zotero.debug(`Found PDF attachment via /web: ${attachment.url}`);
+										return attachment;
+									}
+								}
+							}
+						}
+					}
+				}
+				catch (e) {
+					Zotero.debug(`Failed to get items from ${landingPage}: ${e.message}`);
+					// Continue to next location
+				}
+			}
+		}
+		
+		Zotero.debug("No usable PDF found from any Unpaywall OA location");
+		return null;
 	}
 	catch (e) {
 		Zotero.debug(`Unpaywall request failed: ${e.message}`, 1);
+		return null;
+	}
+};
+
+/**
+ * Get items from a URL using translator
+ * @param {string} url - URL to translate
+ * @return {Promise<Array>} - Array of items
+ */
+PDFSession.prototype.getItemsFromURL = async function (url) {
+	try {
+		let translate = new Translate.Web();
+		translate.setCookieSandbox(this._cookieSandbox);
+		
+		// Fetch the page
+		let req = await Zotero.HTTP.request(
+			"GET",
+			url,
+			{
+				responseType: 'document',
+				cookieSandbox: this._cookieSandbox
+			}
+		);
+		
+		translate.setDocument(req.response);
+		
+		// Get translators
+		let translators = await translate.getTranslators(true);
+		if (!translators || translators.length === 0) {
+			Zotero.debug("No translators found for " + url);
+			return null;
+		}
+		
+		// Try first translator
+		translate.setTranslator(translators[0]);
+		let items = await translate.translate({
+			libraryID: false
+		});
+		
+		return items;
+	}
+	catch (e) {
+		Zotero.debug(`Error translating URL ${url}: ${e.message}`);
 		return null;
 	}
 };
