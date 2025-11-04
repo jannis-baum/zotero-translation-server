@@ -28,10 +28,10 @@ const urlLib = require('url');
 const { CONTENT_TYPES } = require('./formats');
 const Translate = require('./translation/translate');
 const TLDS = Zotero.requireTranslate('./tlds');
+const SearchEndpoint = require('./searchEndpoint');
 const HTTP = require('./http');
 const Translators = require('./translators');
 const ImportEndpoint = require('./importEndpoint');
-const SearchEndpoint = require('./searchEndpoint');
 const { jar: cookieJar } = require('request');
 const { firefox } = require('playwright');
 const { JSDOM } = require('jsdom');
@@ -340,45 +340,13 @@ WebSession.prototype.saveWebpage = function (translate) {
  * @return {Promise<undefined>}
  */
 WebSession.prototype.retryWithPlaywright = async function (url, translator) {
-	let browser;
 	try {
-		browser = await firefox.launch({ headless: true });
-		const context = await browser.newContext();
-		const page = await context.newPage();
-		
-		// Navigate to the page
-		await page.goto(url, {
-			waitUntil: 'networkidle',
-			timeout: 15000
-		});
-		
-		// Get the HTML content
-		const html = await page.content();
-		
-		await browser.close();
-		browser = null;
-		
-		// Parse the HTML into a DOM document using JSDOM
-		const dom = new JSDOM(html, { url: url });
-		const document = dom.window.document;
-		
-		// Create a new translator with the browser-rendered document
-		let translate = new Translate.Web();
-		let items;
-		
-		translate.setDocument(document);
-		translate.setCookieSandbox(this._cookieSandbox);
-		translate.setTranslator(translator);
-		
-		items = await translate.translate({
-			libraryID: false
-		});
+		const items = await SearchEndpoint.retryWithPlaywright(url);
 		
 		// If we got results with attachments, use them
 		if (items && items.length > 0) {
 			let hasAttachments = items.some(item => item.attachments && item.attachments.length > 0);
 			if (hasAttachments) {
-				Zotero.debug("Playwright retry successful, found attachments");
 				var json = [];
 				for (let item of items) {
 					let apiItems = Zotero.Utilities.Item.itemToAPIJSON(item);
@@ -397,9 +365,6 @@ WebSession.prototype.retryWithPlaywright = async function (url, translator) {
 		throw new Error("Playwright retry did not find attachments");
 	}
 	catch (e) {
-		if (browser) {
-			await browser.close().catch(() => {});
-		}
 		throw e;
 	}
 };

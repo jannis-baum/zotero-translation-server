@@ -26,6 +26,8 @@
 const config = require('config');
 const Translate = require('./translation/translate');
 const TextSearch = require('./textSearch');
+const { firefox } = require('playwright');
+const { JSDOM } = require('jsdom');
 
 var SearchEndpoint = module.exports = {
 	handle: async function (ctx, next) {
@@ -56,7 +58,7 @@ var SearchEndpoint = module.exports = {
 	},
 	
 	
-	handleIdentifier: async function (ctx, identifier) {
+	handleIdentifier: async function (ctx, identifier, retriedWithPlaywright = false) {
 		// Identifier
 		try {
 			var translate = new Translate.Search();
@@ -85,6 +87,29 @@ var SearchEndpoint = module.exports = {
 			);
 		}
 		
+		// Check if any items have attachments
+		let hasAttachments = items.some(item => item.attachments && item.attachments.length > 0);
+		
+		// If no attachments and items have URLs, retry with Playwright for full DOM
+		if (!hasAttachments && !retriedWithPlaywright) {
+			for (let item of items) {
+				if (item.url) {
+					Zotero.debug(`No attachments found from identifier search, retrying with Playwright for URL: ${item.url}`);
+					try {
+						const playwrightItems = await this.retryWithPlaywright(item.url);
+						if (playwrightItems && playwrightItems.length > 0) {
+							items = playwrightItems;
+							break;
+						}
+					}
+					catch (e) {
+						Zotero.debug("Playwright retry failed: " + e.message, 1);
+						// Continue with original results
+					}
+				}
+			}
+		}
+		
 		// Translation can return multiple items (e.g., a parent item and notes pointing to it),
 		// so we have to return an array with keyed items
 		var json = [];
@@ -98,5 +123,77 @@ var SearchEndpoint = module.exports = {
 		}
 		
 		ctx.response.body = json;
+	},
+	
+	/**
+	 * Retry translation with Playwright to get full browser-rendered DOM
+	 * This helps translators that need to see dynamically-loaded PDF links
+	 *
+	 * @param {String} url - The URL to fetch
+	 * @return {Promise<Array>} - Array of items with attachments
+	 */
+	retryWithPlaywright: async function (url) {
+		let browser;
+		try {
+			browser = await firefox.launch({ headless: true });
+			const context = await browser.newContext();
+			const page = await context.newPage();
+			
+			// Navigate to the page
+			await page.goto(url, {
+				waitUntil: 'networkidle',
+				timeout: 15000
+			});
+			
+			// Get the HTML content
+			const html = await page.content();
+			
+			await browser.close();
+			browser = null;
+			
+			// Parse the HTML into a DOM document using JSDOM
+			const dom = new JSDOM(html, { url: url });
+			const document = dom.window.document;
+			
+			// Create a new translator with the browser-rendered document
+			let translate = new Translate.Web();
+			translate.setDocument(document);
+			
+			// Get translators for this document
+			let translators = await translate.getTranslators();
+			if (!translators.length) {
+				throw new Error("No translators found for Playwright-rendered page");
+			}
+			
+			// Try translators until we find one with attachments
+			for (let translator of translators) {
+				translate.setTranslator(translator);
+				try {
+					let items = await translate.translate({
+						libraryID: false
+					});
+					
+					if (items && items.length > 0) {
+						let hasAttachments = items.some(item => item.attachments && item.attachments.length > 0);
+						if (hasAttachments) {
+							Zotero.debug("Playwright retry successful, found attachments");
+							return items;
+						}
+					}
+				}
+				catch (e) {
+					Zotero.debug("Translation using " + translator.label + " failed in Playwright retry", 1);
+					// Try next translator
+				}
+			}
+			
+			throw new Error("Playwright retry did not find attachments");
+		}
+		catch (e) {
+			if (browser) {
+				await browser.close().catch(() => {});
+			}
+			throw e;
+		}
 	}
 };
