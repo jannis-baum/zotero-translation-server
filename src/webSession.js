@@ -33,6 +33,8 @@ const Translators = require('./translators');
 const ImportEndpoint = require('./importEndpoint');
 const SearchEndpoint = require('./searchEndpoint');
 const { jar: cookieJar } = require('request');
+const { firefox } = require('playwright');
+const { JSDOM } = require('jsdom');
 
 const SERVER_TRANSLATION_TIMEOUT = 30;
 const FORWARDED_HEADERS = ['Accept-Language'];
@@ -272,6 +274,23 @@ WebSession.prototype.translate = async function (translate, translators) {
 		}
 	}
 	
+	// Check if any items have attachments
+	let hasAttachments = items.some(item => item.attachments && item.attachments.length > 0);
+	
+	// If no attachments found and we have a URL, retry with Playwright for full DOM
+	if (!hasAttachments && translate.location && !this._retriedWithPlaywright) {
+		Zotero.debug("No attachments found in translation, retrying with Playwright to get full DOM");
+		this._retriedWithPlaywright = true;
+		try {
+			await this.retryWithPlaywright(translate.location, translator);
+			return;
+		}
+		catch (e) {
+			Zotero.debug("Playwright retry failed: " + e.message, 1);
+			// Continue with original results
+		}
+	}
+	
 	var json = [];
 	for (let item of items) {
 		let apiItems = Zotero.Utilities.Item.itemToAPIJSON(item);
@@ -310,6 +329,79 @@ WebSession.prototype.saveWebpage = function (translate) {
 		accessDate: Zotero.Date.dateToISO(new Date())
 	};
 	this.ctx.response.body = Zotero.Utilities.Item.itemToAPIJSON(data);
+};
+
+/**
+ * Retry translation with Playwright to get full browser-rendered DOM
+ * This helps translators that need to see dynamically-loaded PDF links
+ *
+ * @param {String} url - The URL to fetch
+ * @param {Object} translator - The translator object to use
+ * @return {Promise<undefined>}
+ */
+WebSession.prototype.retryWithPlaywright = async function (url, translator) {
+	let browser;
+	try {
+		browser = await firefox.launch({ headless: true });
+		const context = await browser.newContext();
+		const page = await context.newPage();
+		
+		// Navigate to the page
+		await page.goto(url, {
+			waitUntil: 'networkidle',
+			timeout: 15000
+		});
+		
+		// Get the HTML content
+		const html = await page.content();
+		
+		await browser.close();
+		browser = null;
+		
+		// Parse the HTML into a DOM document using JSDOM
+		const dom = new JSDOM(html, { url: url });
+		const document = dom.window.document;
+		
+		// Create a new translator with the browser-rendered document
+		let translate = new Translate.Web();
+		let items;
+		
+		translate.setDocument(document);
+		translate.setCookieSandbox(this._cookieSandbox);
+		translate.setTranslator(translator);
+		
+		items = await translate.translate({
+			libraryID: false
+		});
+		
+		// If we got results with attachments, use them
+		if (items && items.length > 0) {
+			let hasAttachments = items.some(item => item.attachments && item.attachments.length > 0);
+			if (hasAttachments) {
+				Zotero.debug("Playwright retry successful, found attachments");
+				var json = [];
+				for (let item of items) {
+					let apiItems = Zotero.Utilities.Item.itemToAPIJSON(item);
+					// Preserve attachments from original item for PDF endpoint
+					for (let apiItem of apiItems) {
+						apiItem.attachments = item.attachments;
+					}
+					json.push(...apiItems);
+				}
+				this.ctx.response.status = 200;
+				this.ctx.response.body = json;
+				return;
+			}
+		}
+		
+		throw new Error("Playwright retry did not find attachments");
+	}
+	catch (e) {
+		if (browser) {
+			await browser.close().catch(() => {});
+		}
+		throw e;
+	}
 };
 
 
