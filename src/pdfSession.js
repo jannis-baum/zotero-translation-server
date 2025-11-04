@@ -189,7 +189,13 @@ PDFSession.prototype.translate = async function (translate, translators) {
 	
 	// Find PDF attachment
 	let pdfAttachment = null;
+	let itemWithDOI = null;
 	for (let item of items) {
+		// Track item with DOI for Unpaywall fallback
+		if (item.DOI && !itemWithDOI) {
+			itemWithDOI = item;
+		}
+		
 		if (item.attachments && item.attachments.length > 0) {
 			// Look for primary attachment types (PDF, EPUB)
 			for (let attachment of item.attachments) {
@@ -200,6 +206,11 @@ PDFSession.prototype.translate = async function (translate, translators) {
 			}
 			if (pdfAttachment) break;
 		}
+	}
+	
+	// If no PDF found from translator, try Unpaywall
+	if (!pdfAttachment && itemWithDOI) {
+		pdfAttachment = await this.findPDFViaUnpaywall(itemWithDOI);
 	}
 	
 	if (!pdfAttachment) {
@@ -256,4 +267,92 @@ PDFSession.prototype.translate = async function (translate, translators) {
 		Zotero.debug("Error fetching PDF: " + e, 1);
 		this.ctx.throw(500, "Failed to fetch PDF: " + e.message);
 	}
+};
+
+/**
+ * Try to find open-access PDF via Unpaywall
+ * @param {Object} item - Item with DOI
+ * @return {Promise<Object|null>} - PDF attachment object or null
+ */
+PDFSession.prototype.findPDFViaUnpaywall = async function (item) {
+	if (!item.DOI) return null;
+	
+	let doi = Zotero.Utilities.cleanDOI(item.DOI);
+	if (!doi) return null;
+	
+	Zotero.debug(`Trying Unpaywall for DOI: ${doi}`);
+	
+	// Get email for Unpaywall API
+	let email = await this.getUnpaywallEmail();
+	if (!email) {
+		Zotero.debug("No email configured for Unpaywall API");
+		return null;
+	}
+	
+	try {
+		let url = `https://api.unpaywall.org/v2/${encodeURIComponent(doi)}?email=${encodeURIComponent(email)}`;
+		let response = await Zotero.HTTP.request(
+			"GET",
+			url,
+			{
+				timeout: 10000,
+				responseType: 'json',
+				successCodes: [200, 404] // 404 is OK, just means not found
+			}
+		);
+		
+		if (response.status === 404) {
+			Zotero.debug("No open-access PDF found via Unpaywall");
+			return null;
+		}
+		
+		let data = response.response;
+		
+		// Look for best open access location
+		let bestLocation = data.best_oa_location;
+		if (!bestLocation || !bestLocation.url_for_pdf) {
+			Zotero.debug("No PDF URL in Unpaywall response");
+			return null;
+		}
+		
+		Zotero.debug(`Found open-access PDF via Unpaywall: ${bestLocation.url_for_pdf}`);
+		
+		return {
+			url: bestLocation.url_for_pdf,
+			title: item.title || 'Unpaywall PDF',
+			mimeType: 'application/pdf'
+		};
+	}
+	catch (e) {
+		Zotero.debug(`Unpaywall request failed: ${e.message}`, 1);
+		return null;
+	}
+};
+
+/**
+ * Get email address for Unpaywall API
+ * First checks UNPAYWALL_EMAIL env var, then falls back to git config user.email
+ * @return {Promise<string|null>}
+ */
+PDFSession.prototype.getUnpaywallEmail = async function () {
+	// Check environment variable first
+	// eslint-disable-next-line no-process-env
+	if (process.env.UNPAYWALL_EMAIL) {
+		// eslint-disable-next-line no-process-env
+		return process.env.UNPAYWALL_EMAIL;
+	}
+	
+	// Fallback to git config user.email
+	try {
+		const { execSync } = require('child_process');
+		let email = execSync('git config user.email', { encoding: 'utf8' }).trim();
+		if (email) {
+			return email;
+		}
+	}
+	catch (e) {
+		Zotero.debug("Could not get git user.email: " + e.message);
+	}
+	
+	return null;
 };

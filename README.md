@@ -145,13 +145,24 @@ $ curl -d 'https://arxiv.org/abs/1234.5678' \
 
 The endpoint will:
 1. Use Zotero translators to extract metadata and locate PDF attachments
-2. Download the PDF file from the discovered URL
-3. Return the PDF as `application/pdf` with appropriate filename
+2. If no PDF is found by translators and the item has a DOI, query Unpaywall for open-access PDFs
+3. Download the PDF file from the discovered URL
+4. Return the PDF as `application/pdf` with appropriate filename
+
+#### Unpaywall Integration
+
+To enable Unpaywall for finding open-access PDFs, set the `UNPAYWALL_EMAIL` environment variable to your email address:
+
+```
+UNPAYWALL_EMAIL='your-email@example.com' npm start
+```
+
+If `UNPAYWALL_EMAIL` is not set, the server will fall back to using `git config user.email`.
 
 Returns:
 - `200 OK` with PDF binary data if successful
 - `400 Bad Request` if the URL is invalid or the page cannot be accessed
-- `404 Not Found` if no PDF attachment is found
+- `501 Not Implemented` if no PDF attachment is found (including via Unpaywall)
 - `501 Not Implemented` if no translator is available for the URL
 
 Note: This endpoint does not support item selection (multiple items). It will return an error if the translator finds multiple items.
