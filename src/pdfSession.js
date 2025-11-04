@@ -85,7 +85,12 @@ PDFSession.prototype.handleItems = async function (items) {
 	for (let candidate of pdfCandidates) {
 		try {
 			Zotero.debug(`Trying to download PDF from: ${candidate.url}`);
-			await this.downloadPDFWithPlaywright(candidate);
+			try {
+				await this.downloadPDF(candidate);
+			}
+			catch (e) {
+				await this.downloadPDFWithPlaywright(candidate);
+			}
 			return; // Success! Exit the function
 		}
 		catch (e) {
@@ -120,10 +125,10 @@ PDFSession.prototype.downloadPDFWithPlaywright = async function (pdfAttachment) 
 		
 		const page = await context.newPage();
 		
-		// Navigate and wait for download with shorter timeout (15 seconds)
+		// Navigate and wait for download with timeout
 		const [download] = await Promise.all([
-			page.waitForEvent('download', { timeout: 15000 }),
-			page.goto(pdfURL, { timeout: 15000 })
+			page.waitForEvent('download', { timeout: 7000 }),
+			page.goto(pdfURL, { timeout: 7000 })
 		]);
 		
 		// Get the downloaded file as a buffer
@@ -133,30 +138,7 @@ PDFSession.prototype.downloadPDFWithPlaywright = async function (pdfAttachment) 
 			chunks.push(chunk);
 		}
 		const buffer = Buffer.concat(chunks);
-		
-		// Verify it's a PDF
-		const header = buffer.slice(0, 5).toString('utf8');
-		if (!header.startsWith('%PDF')) {
-			throw new Error(`Downloaded file is not a PDF (starts with: ${header})`);
-		}
-		
-		// Return the PDF
-		this.ctx.response.status = 200;
-		this.ctx.response.set('Content-Type', 'application/pdf');
-		if (pdfAttachment.title) {
-			// Sanitize filename: remove path components, special chars, and limit length
-			let filename = pdfAttachment.title
-				.replace(/[/\\]/g, '') // Remove path separators
-				.replace(/\.\./g, '') // Remove parent directory references
-				.replace(/[^a-zA-Z0-9_\-. ]/g, '_') // Replace special chars
-				.substring(0, 200); // Limit length
-			if (!filename.endsWith('.pdf')) {
-				filename += '.pdf';
-			}
-			this.ctx.response.set('Content-Disposition', `attachment; filename="${filename}"`);
-		}
-		
-		this.ctx.response.body = buffer;
+		this.validatePDF(buffer, pdfAttachment.title);
 	}
 	catch (e) {
 		Zotero.debug("Error fetching PDF with Playwright: " + e, 1);
@@ -169,6 +151,73 @@ PDFSession.prototype.downloadPDFWithPlaywright = async function (pdfAttachment) 
 		}
 	}
 };
+
+/**
+ * Download a PDF from an attachment object and return it
+ * @param {Object} pdfAttachment - Attachment object with url, title, mimeType
+ * @return {Promise<undefined>}
+ */
+PDFSession.prototype.downloadPDF = async function (pdfAttachment) {
+	try {
+		let pdfURL = pdfAttachment.url;
+		Zotero.debug(`Fetching PDF from ${pdfURL}`);
+		
+		// Use buffer responseType to get raw binary data
+		let responseTypeMap = new Map([
+			['application/pdf', 'buffer'],
+			['application/octet-stream', 'buffer'],
+			['text/html', 'buffer'] // Some servers return HTML for PDFs
+		]);
+		
+		let response = await Zotero.HTTP.request(
+			"GET",
+			pdfURL,
+			{
+				timeout: 60000,
+				cookieSandbox: this._cookieSandbox,
+				responseTypeMap: responseTypeMap,
+				successCodes: false, // Allow any status code
+				maxResponseSize: 50 * 1024 * 1024 // 50MB max for PDFs
+			}
+		);
+		
+		// Check if we actually got a PDF (starts with %PDF)
+		let buffer = response.response;
+		this.validatePDF(buffer, pdfAttachment.title);
+	}
+	catch (e) {
+		Zotero.debug("Error fetching PDF: " + e, 1);
+		throw e;
+	}
+};
+
+PDFSession.prototype.validatePDF = function (buffer, title) {
+	// Verify it's a PDF
+	if (!Buffer.isBuffer(buffer)) throw new Error('No buffer was returned');
+	const header = buffer.slice(0, 5).toString('utf8');
+	if (!header.startsWith('%PDF')) {
+		throw new Error(`Downloaded file is not a PDF (starts with: ${header})`);
+	}
+		
+	// Return the PDF
+	this.ctx.response.status = 200;
+	this.ctx.response.set('Content-Type', 'application/pdf');
+	if (title) {
+		// Sanitize filename: remove path components, special chars, and limit length
+		let filename = title
+				.replace(/[/\\]/g, '') // Remove path separators
+				.replace(/\.\./g, '') // Remove parent directory references
+				.replace(/[^a-zA-Z0-9_\-. ]/g, '_') // Replace special chars
+				.substring(0, 200); // Limit length
+		if (!filename.endsWith('.pdf')) {
+			filename += '.pdf';
+		}
+		this.ctx.response.set('Content-Disposition', `attachment; filename="${filename}"`);
+	}
+		
+	this.ctx.response.body = buffer;
+};
+
 
 /**
  * Find all possible PDF candidates via Unpaywall by trying all OA locations
