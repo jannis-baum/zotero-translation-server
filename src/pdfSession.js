@@ -109,6 +109,11 @@ PDFSession.prototype.handleItems = async function (items) {
  * @param {Object} pdfAttachment - Attachment object with url, title, mimeType
  * @return {Promise<undefined>}
  */
+/**
+ * Download a PDF using Playwright (handles bot protection)
+ * @param {Object} pdfAttachment - Attachment object with url, title, mimeType, articleURL (optional)
+ * @return {Promise<undefined>}
+ */
 PDFSession.prototype.downloadPDFWithPlaywright = async function (pdfAttachment) {
 	let browser = null;
 	try {
@@ -125,10 +130,45 @@ PDFSession.prototype.downloadPDFWithPlaywright = async function (pdfAttachment) 
 		
 		const page = await context.newPage();
 		
-		// Navigate and wait for download with timeout
-		const [download] = await Promise.all([
-			page.waitForEvent('download', { timeout: 7000 }),
-			page.goto(pdfURL, { timeout: 7000 })
+		// If we have an article URL, visit it first to establish session/bypass bot protection
+		// Then navigate to PDF URL
+		let articleURL = pdfAttachment.articleURL;
+		if (!articleURL && pdfURL.includes('/pdf/')) {
+			// Try to infer article URL from PDF URL for common patterns
+			articleURL = pdfURL.replace(/\/pdf\/([^?]+).*$/, '/$1');
+		}
+		
+		if (articleURL && articleURL !== pdfURL) {
+			try {
+				Zotero.debug(`Visiting article page first: ${articleURL}`);
+				await page.goto(articleURL, { 
+					waitUntil: 'domcontentloaded',
+					timeout: 15000 
+				});
+				// Wait a bit for any JavaScript/cookies to settle
+				await page.waitForTimeout(1000);
+			}
+			catch (e) {
+				Zotero.debug(`Failed to visit article page: ${e.message}`);
+				// Continue anyway, might still work
+			}
+		}
+		
+		// Now try to download the PDF
+		const downloadPromise = page.waitForEvent('download', { timeout: 20000 });
+		
+		// Navigate and catch errors
+		const gotoPromise = page.goto(pdfURL, { timeout: 20000 }).catch((e) => {
+			// Ignore navigation errors when download starts - this is expected for PDF downloads
+			Zotero.debug(`Navigation error (expected for downloads): ${e.message}`);
+		});
+		
+		// Wait for either download to start or navigation to complete
+		const download = await Promise.race([
+			downloadPromise,
+			gotoPromise.then(() => {
+				throw new Error('Page loaded without triggering download - PDF URL may be blocked');
+			})
 		]);
 		
 		// Get the downloaded file as a buffer

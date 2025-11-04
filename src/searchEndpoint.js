@@ -141,8 +141,8 @@ var SearchEndpoint = module.exports = {
 			
 			// Navigate to the page
 			await page.goto(url, {
-				waitUntil: 'networkidle',
-				timeout: 15000
+				waitUntil: 'domcontentloaded',
+				timeout: 30000
 			});
 			
 			// Get the HTML content
@@ -166,6 +166,8 @@ var SearchEndpoint = module.exports = {
 			}
 			
 			// Try translators until we find one with attachments
+			let lastItems = null;
+			let lastError = null;
 			for (let translator of translators) {
 				translate.setTranslator(translator);
 				try {
@@ -174,6 +176,7 @@ var SearchEndpoint = module.exports = {
 					});
 					
 					if (items && items.length > 0) {
+						lastItems = items;
 						let hasAttachments = items.some(item => item.attachments && item.attachments.length > 0);
 						if (hasAttachments) {
 							Zotero.debug("Playwright retry successful, found attachments");
@@ -182,9 +185,39 @@ var SearchEndpoint = module.exports = {
 					}
 				}
 				catch (e) {
+					lastError = e;
 					Zotero.debug("Translation using " + translator.label + " failed in Playwright retry", 1);
 					// Try next translator
 				}
+			}
+			
+			// If translators didn't find attachments, try to extract PDF links manually from the DOM
+			// This works even if translators failed completely
+			Zotero.debug("Translators didn't find attachments, attempting manual PDF extraction from DOM");
+			let pdfLinks = this.extractPDFLinks(document, url);
+			if (pdfLinks.length > 0) {
+				// Add article URL to attachments to help with download
+				pdfLinks.forEach(link => {
+					link.articleURL = url;
+				});
+				
+				// If we have items from translator, add attachments to them
+				// Otherwise create a minimal item
+				if (!lastItems || lastItems.length === 0) {
+					Zotero.debug("Creating minimal item for manual PDF extraction");
+					lastItems = [{
+						itemType: 'journalArticle',
+						title: document.title || 'Unknown Title',
+						url: url
+					}];
+				}
+				
+				if (!lastItems[0].attachments) {
+					lastItems[0].attachments = [];
+				}
+				lastItems[0].attachments.push(...pdfLinks);
+				Zotero.debug(`Manually extracted ${pdfLinks.length} PDF link(s) from DOM`);
+				return lastItems;
 			}
 			
 			throw new Error("Playwright retry did not find attachments");
@@ -195,5 +228,88 @@ var SearchEndpoint = module.exports = {
 			}
 			throw e;
 		}
+	},
+	
+	/**
+	 * Extract PDF links from a document using common patterns
+	 * This is a fallback for when translators fail to extract attachments
+	 *
+	 * @param {Document} document - The JSDOM document
+	 * @param {String} baseURL - The base URL for resolving relative links
+	 * @return {Array} - Array of attachment objects
+	 */
+	extractPDFLinks: function (document, baseURL) {
+		let attachments = [];
+		let seenUrls = new Set();
+		
+		// Common PDF link patterns to look for (prioritized)
+		const pdfPatterns = [
+			{ pattern: /\/pdf\/[^\/]+\?download=true$/i, priority: 1, exclude: /suppl/i },
+			{ pattern: /\/pdf\/[^\/]+$/i, priority: 2, exclude: /suppl/i },
+			{ pattern: /\.pdf$/i, priority: 3, exclude: /suppl/i },
+			{ pattern: /download.*pdf/i, priority: 4, exclude: /suppl/i },
+			{ pattern: /pdf.*download/i, priority: 5, exclude: /suppl/i },
+			{ pattern: /fulltext.*pdf/i, priority: 6, exclude: /suppl/i },
+			{ pattern: /viewPDF/i, priority: 7, exclude: /suppl/i }
+		];
+		
+		// Find all links
+		let links = document.querySelectorAll('a[href]');
+		let candidates = [];
+		
+		for (let link of links) {
+			let href = link.getAttribute('href');
+			if (!href) continue;
+			
+			// Check if this looks like a PDF link
+			let matchedPattern = null;
+			for (let patternObj of pdfPatterns) {
+				if (patternObj.pattern.test(href)) {
+					// Exclude supplementary files
+					if (patternObj.exclude && patternObj.exclude.test(href)) {
+						continue;
+					}
+					matchedPattern = patternObj;
+					break;
+				}
+			}
+			
+			if (!matchedPattern) continue;
+			
+			// Resolve relative URLs
+			let absoluteUrl;
+			try {
+				absoluteUrl = new URL(href, baseURL).href;
+			} catch (e) {
+				continue;
+			}
+			
+			// Avoid duplicates
+			if (seenUrls.has(absoluteUrl)) continue;
+			seenUrls.add(absoluteUrl);
+			
+			// Get link text for title
+			let title = link.textContent.trim() || 'Full Text PDF';
+			if (title.length > 100) {
+				title = 'Full Text PDF';
+			}
+			
+			candidates.push({
+				url: absoluteUrl,
+				title: title,
+				mimeType: 'application/pdf',
+				priority: matchedPattern.priority
+			});
+		}
+		
+		// Sort by priority (lower number = higher priority)
+		candidates.sort((a, b) => a.priority - b.priority);
+		
+		// Return attachments (remove priority field)
+		return candidates.map(c => ({
+			url: c.url,
+			title: c.title,
+			mimeType: c.mimeType
+		}));
 	}
 };
