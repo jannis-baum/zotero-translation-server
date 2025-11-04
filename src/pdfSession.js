@@ -96,7 +96,8 @@ PDFSession.prototype.downloadPDF = async function (pdfAttachment) {
 		// Use buffer responseType to get raw binary data
 		let responseTypeMap = new Map([
 			['application/pdf', 'buffer'],
-			['application/octet-stream', 'buffer']
+			['application/octet-stream', 'buffer'],
+			['text/html', 'buffer'] // Some servers return HTML for PDFs
 		]);
 		
 		let response = await Zotero.HTTP.request(
@@ -111,8 +112,18 @@ PDFSession.prototype.downloadPDF = async function (pdfAttachment) {
 			}
 		);
 		
-		// Note: We accept any content-type since many servers serve PDFs with generic MIME types
-		// The translator already verified this is a PDF attachment, so we trust that
+		// Check if we actually got a PDF (starts with %PDF)
+		let buffer = response.response;
+		if (Buffer.isBuffer(buffer)) {
+			let header = buffer.slice(0, 5).toString('utf8');
+			if (!header.startsWith('%PDF')) {
+				// Not a PDF - probably an error page
+				let contentType = response.getResponseHeader('content-type');
+				Zotero.debug(`Expected PDF but got content-type: ${contentType}`);
+				Zotero.debug(`Response starts with: ${buffer.slice(0, 200).toString('utf8')}`);
+				throw new Error(`Downloaded file is not a PDF (starts with: ${header})`);
+			}
+		}
 		
 		// Return the PDF
 		this.ctx.response.status = 200;

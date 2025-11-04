@@ -274,7 +274,14 @@ WebSession.prototype.translate = async function (translate, translators) {
 	
 	var json = [];
 	for (let item of items) {
-		json.push(...Zotero.Utilities.Item.itemToAPIJSON(item));
+		let apiItems = Zotero.Utilities.Item.itemToAPIJSON(item);
+		// Preserve attachments from original item for PDF endpoint
+		if (item.attachments && item.attachments.length > 0) {
+			for (let apiItem of apiItems) {
+				apiItem.attachments = item.attachments;
+			}
+		}
+		json.push(...apiItems);
 	}
 	this.ctx.response.status = 200;
 	this.ctx.response.body = json;
