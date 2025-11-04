@@ -37,13 +37,12 @@ describe("/pdf", function () {
 	// Real-world tests (require network access - skip in CI)
 	describe("Real paper downloads", function () {
 		this.timeout(30000); // Allow 30 seconds for network requests
-		
-		it.skip("should download PDF from arXiv using translator attachments", async function () {
-			// arXiv paper: https://arxiv.org/abs/2505.23839v1
+
+		const testURL = async (url) => {
 			var webResponse = await request()
 				.post('/web')
 				.set('Content-Type', 'text/plain')
-				.send('https://arxiv.org/abs/2505.23839v1');
+				.send(url);
 			assert.equal(webResponse.statusCode, 200);
 			assert.isArray(webResponse.body);
 			assert.isAbove(webResponse.body.length, 0);
@@ -60,31 +59,18 @@ describe("/pdf", function () {
 			var header = pdfBuffer.slice(0, 5).toString('utf8');
 			assert.equal(header, '%PDF-', 'Downloaded file should be a valid PDF');
 			assert.isAbove(pdfBuffer.length, 1000, 'PDF should be substantial size');
+		};
+		
+		it("should download PDF from arXiv using translator attachments", async function () {
+			await testURL('https://arxiv.org/abs/2505.23839v1');
 		});
-		
-		it.skip("should download PDF from Science.org using Unpaywall", async function () {
-			// Science.org paper: https://www.science.org/doi/10.1126/science.aar4120
-			// This should use Unpaywall since direct access is restricted
-			var webResponse = await request()
-				.post('/web')
-				.set('Content-Type', 'text/plain')
-				.send('https://www.science.org/doi/10.1126/science.aar4120');
-			assert.equal(webResponse.statusCode, 200);
-			assert.isArray(webResponse.body);
-			assert.isAbove(webResponse.body.length, 0);
-			
-			var pdfResponse = await request()
-				.post('/pdf')
-				.set('Content-Type', 'application/json')
-				.send(webResponse.body);
-			assert.equal(pdfResponse.statusCode, 200);
-			assert.equal(pdfResponse.headers['content-type'], 'application/pdf');
-			
-			// Verify it's actually a PDF (starts with %PDF)
-			var pdfBuffer = Buffer.from(pdfResponse.body);
-			var header = pdfBuffer.slice(0, 5).toString('utf8');
-			assert.equal(header, '%PDF-', 'Downloaded file should be a valid PDF');
-			assert.isAbove(pdfBuffer.length, 1000, 'PDF should be substantial size');
+
+		it("should download PDF from Science.org using Unpaywall", async function () {
+			await testURL('https://www.science.org/doi/10.1126/science.aar4120');
+		});
+
+		it("should download PDF from ASM Journals using Playwright to fully load the site", async function () {
+			await testURL('https://journals.asm.org/doi/10.1128/mmbr.00022-25');
 		});
 	});
 });
