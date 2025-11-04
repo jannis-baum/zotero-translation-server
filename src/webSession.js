@@ -276,10 +276,8 @@ WebSession.prototype.translate = async function (translate, translators) {
 	for (let item of items) {
 		let apiItems = Zotero.Utilities.Item.itemToAPIJSON(item);
 		// Preserve attachments from original item for PDF endpoint
-		if (item.attachments && item.attachments.length > 0) {
-			for (let apiItem of apiItems) {
-				apiItem.attachments = item.attachments;
-			}
+		for (let apiItem of apiItems) {
+			apiItem.attachments = item.attachments;
 		}
 		json.push(...apiItems);
 	}

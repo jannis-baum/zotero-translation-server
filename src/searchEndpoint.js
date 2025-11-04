@@ -87,11 +87,16 @@ var SearchEndpoint = module.exports = {
 		
 		// Translation can return multiple items (e.g., a parent item and notes pointing to it),
 		// so we have to return an array with keyed items
-		var newItems = [];
-		items.forEach(item => {
-			newItems.push(...Zotero.Utilities.Item.itemToAPIJSON(item));
-		});
+		var json = [];
+		for (let item of items) {
+			let apiItems = Zotero.Utilities.Item.itemToAPIJSON(item);
+			// Preserve attachments from original item for PDF endpoint
+			for (let apiItem of apiItems) {
+				apiItem.attachments = item.attachments;
+			}
+			json.push(...apiItems);
+		}
 		
-		ctx.response.body = newItems;
+		ctx.response.body = json;
 	}
 };
