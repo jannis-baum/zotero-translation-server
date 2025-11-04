@@ -72,5 +72,9 @@ describe("/pdf", function () {
 		it("should download PDF from ASM Journals using Playwright to fully load the site", async function () {
 			await testURL('https://journals.asm.org/doi/10.1128/mmbr.00022-25');
 		});
+
+		it("should download Nature paper", async function () {
+			await testURL('https://www.nature.com/articles/nbt.3988');
+		});
 	});
 });
