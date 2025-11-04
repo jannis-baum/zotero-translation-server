@@ -164,7 +164,11 @@ The `/pdf` endpoint:
 1. Accepts an array of items from the `/web` endpoint
 2. Searches for PDF attachments in the items
 3. If no PDF is found and the item has a DOI, queries Unpaywall for open-access PDFs
-4. Downloads and returns the PDF with appropriate filename
+4. For each Unpaywall OA location:
+   - If a direct PDF URL exists, uses it
+   - Otherwise, feeds the landing page URL back to the translator to find attachments
+5. Downloads the PDF using Playwright (headless Firefox browser) to handle bot protection
+6. Returns the PDF with appropriate filename
 
 #### Why Two-Step Process?
 
@@ -172,7 +176,9 @@ This design leverages the robust error handling in `/web` (e.g., handling 403 er
 
 #### Unpaywall Integration
 
-To enable Unpaywall for finding open-access PDFs, set the `UNPAYWALL_EMAIL` environment variable to your email address:
+The endpoint tries ALL open-access locations from Unpaywall, not just the "best" one. For each location, it attempts to find working PDF attachments.
+
+To enable Unpaywall, set the `UNPAYWALL_EMAIL` environment variable:
 
 ```bash
 UNPAYWALL_EMAIL='your-email@example.com' npm start
@@ -180,9 +186,24 @@ UNPAYWALL_EMAIL='your-email@example.com' npm start
 
 If `UNPAYWALL_EMAIL` is not set, the server will fall back to using `git config user.email`.
 
+#### Bot Protection Handling
+
+The endpoint uses Playwright with headless Firefox to download PDFs, which bypasses most bot protection mechanisms by simulating a real browser. This works for sites like:
+- arXiv (via translator attachments)
+- PubMed Central (via Unpaywall landing pages)
+- Most repository and publisher sites
+
+**Setup:**
+After installing dependencies, install the Firefox browser for Playwright:
+
+```bash
+npx playwright install firefox
+```
+
 Returns:
 - `200 OK` with PDF binary data if successful
 - `400 Bad Request` if the input is invalid or empty
+- `500 Internal Server Error` if PDF download fails (network error, etc.)
 - `501 Not Implemented` if no PDF attachment is found (including via Unpaywall)
 
 
